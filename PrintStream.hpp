@@ -38,8 +38,29 @@ concept is_int = same_as<T, unsigned short> || same_as<T, unsigned int> ||
                  same_as<T, unsigned long> || same_as<T, unsigned long long> || same_as<T, short> ||
                  same_as<T, int> || same_as<T, long> || same_as<T, long long>;
 
+template <typename T>
+concept is_string = std::is_same_v<std::remove_cvref_t<T>, std::string_view> ||
+                    std::is_same_v<std::remove_cvref_t<T>, std::string>;
+
+template <typename T>
+concept is_c_string =
+    std::is_pointer_v<std::decay_t<T>> &&
+    std::is_same_v<char, std::remove_cv_t<std::remove_pointer_t<std::decay_t<T>>>>;
+
+template <typename T>
+concept tuple_like = requires(T t) { std::tuple_size<T> {}; };
+
+template <typename T>
+concept is_map = requires(T t) {
+    typename T::key_type;
+    typename T::mapped_type;
+};
+
+template <typename T>
+concept is_set = requires { typename T::key_type; } && (!requires { typename T::mapped_type; });
+
 template <typename OutStream>
-    requires is_base_of_v<ostream, OutStream>
+requires is_base_of_v<ostream, OutStream>
 class PrintStream
 {
     OutStream* out;
@@ -57,6 +78,46 @@ class PrintStream
     bool nano {false};
     bool milli {true};
     bool second {false};
+
+    void print_char(char c)
+    {
+        if (c >= ' ' && c <= '~' && c != '\\') [[likely]] // c >= 32 && c <= 126
+        {
+            *out << c;
+            return;
+        }
+
+        switch (c)
+        {
+        case '\n':
+            *out << R"(\n)";
+            break;
+        case '\t':
+            *out << R"(\t)";
+            break;
+        case '\r':
+            *out << R"(\r)";
+            break;
+        case '\v':
+            *out << R"(\v)";
+            break;
+        case '\f':
+            *out << R"(\f)";
+            break;
+        case '\a':
+            *out << R"(\a)";
+            break;
+        case '\\':
+            *out << R"(\\)";
+            break;
+        case '\"':
+            *out << R"(\")";
+            break;
+        default:
+            *out << R"(\x)" << std::hex << std::setw(2) << std::setfill('0')
+                 << static_cast<int>(static_cast<unsigned char>(c)) << std::dec;
+        }
+    }
 
 public:
     explicit PrintStream(OutStream& out_) : out {&out_} {}
@@ -184,9 +245,36 @@ public:
 
 public:
     template <typename T>
-        requires requires(OutStream& out, const T& obj) { out << obj; } && (!is_int<T>) &&
-                 (!is_floating_point_v<T>) && (!requires(T t) { typename T::element_type; }) &&
-                 (!is_array_v<T>)
+    requires is_string<T>
+    PrintStream& operator<<(const T& s)
+    {
+        *out << '"';
+        for (char c : s) { print_char(c); }
+        *out << '"';
+        return *this;
+    }
+
+    template <size_t N>
+    PrintStream& operator<<(const char (&s)[N])
+    {
+        *out << '"';
+        for (char c : s) { print_char(c); }
+        *out << '"';
+        return *this;
+    }
+
+    PrintStream& operator<<(const char* s)
+    {
+        *out << '"';
+        for (const char* p = s; *p != 0; ++p) { print_char(*p); }
+        *out << '"';
+        return *this;
+    }
+
+    template <typename T>
+    requires requires(OutStream& out, const T& obj) { out << obj; } && (!is_int<T>) &&
+             (!is_floating_point_v<T>) && (!requires(T t) { typename T::element_type; }) &&
+             (!is_array_v<T>) && (!is_string<T>) && (!is_c_string<T>)
     PrintStream& operator<<(const T& obj)
     {
         *out << obj;
@@ -201,9 +289,8 @@ public:
     }
 
     template <typename T>
-        requires ranges::input_range<const T> && (!convertible_to<const T, string_view>) &&
-                 (!requires { std::tuple_size<T>::value; }) &&
-                 (!requires { typename T::key_type; }) && (!requires { typename T::mapped_type; })
+    requires ranges::input_range<const T> && (!is_string<T>) && (!tuple_like<T>) && (!is_set<T>) &&
+             (!is_map<T>)
     PrintStream& operator<<(const T& list)
     {
         size_t list_size {};
@@ -243,7 +330,7 @@ public:
     }
 
     template <typename T>
-        requires requires { std::tuple_size<T>::value; }
+    requires tuple_like<T>
     PrintStream& operator<<(const T& tuple) // pair、array、tuple
     {
         if constexpr (tuple_size_v<T> == 0)
@@ -268,7 +355,7 @@ public:
     }
 
     template <typename T>
-        requires requires { typename T::key_type; } && (!requires { typename T::mapped_type; })
+    requires is_set<T>
     PrintStream& operator<<(const T& set)
     {
         size_t set_size {ranges::size(set)};
@@ -306,7 +393,7 @@ public:
     }
 
     template <typename T>
-        requires requires { typename T::key_type; } && requires { typename T::mapped_type; }
+    requires is_map<T>
     PrintStream& operator<<(const T& map)
     {
         size_t map_size {ranges::size(map)};
@@ -355,7 +442,7 @@ public:
     }
 
     template <typename T>
-        requires requires { typename T::container_type; }
+    requires requires { typename T::container_type; }
     PrintStream& operator<<(const T& adapter)
     {
         struct AdapterVisitor : T
@@ -369,7 +456,7 @@ public:
     }
 
     template <typename T>
-        requires is_int<T>
+    requires is_int<T>
     PrintStream& operator<<(const T& number)
     {
         array<char, 1024> buf {};
@@ -396,7 +483,7 @@ public:
 
 
     template <typename T>
-        requires is_floating_point_v<T>
+    requires is_floating_point_v<T>
     PrintStream& operator<<(const T& number)
     {
         array<char, 1024> buf {};
@@ -421,7 +508,7 @@ public:
     }
 
     template <typename T>
-        requires requires(T t) { typename T::element_type; }
+    requires requires(T t) { typename T::element_type; }
     PrintStream& operator<<(const T& smart_pointer)
     {
         if constexpr (requires { T {}.expired(); })
@@ -443,7 +530,7 @@ public:
     }
 
     template <typename T>
-        requires input_or_output_iterator<T> && (!is_pointer_v<T>)
+    requires input_or_output_iterator<T> && (!is_pointer_v<T>)
     PrintStream& operator<<(const T&)
     {
         if constexpr (contiguous_iterator<T>)
@@ -482,7 +569,7 @@ public:
     }
 
     template <typename T>
-        requires is_enum_v<T>
+    requires is_enum_v<T>
     PrintStream& generic_to_string(const T& enumer)
     {
         *out << type_name<T>() << '(' << static_cast<underlying_type_t<T>>(enumer) << ')';
@@ -490,7 +577,7 @@ public:
     }
 
     template <typename T>
-        requires is_base_of_v<istream, T>
+    requires is_base_of_v<istream, T>
     PrintStream& operator<<(T& in)
     {
         *out << "input stream with state = ";
@@ -590,7 +677,7 @@ public:
     }
 
     template <typename T>
-        requires same_as<T, any>
+    requires same_as<T, any>
     PrintStream& operator<<(const T& any)
     {
         *out << "any<";
